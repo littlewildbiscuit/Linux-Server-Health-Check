@@ -3,12 +3,14 @@
 # Script Name: healthcheck.sh
 # Description: 无 Agent 自动化运维巡检脚本 (SSH + Webhook)
 # ==============================================================================
-set -u
+set -eu
+set -o pipefail
 
 # --- 1. 全局环境与路径配置 ---
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 HOSTS_CONF="$BASE_DIR/conf/hosts.conf"
+WEBHOOK_CONF="$BASE_DIR/conf/webhook.conf"
 LOG_RETENTION_DAYS=7
 
 if [ ! -f "$HOSTS_CONF" ]; then
@@ -17,7 +19,7 @@ if [ ! -f "$HOSTS_CONF" ]; then
 fi
 
 # --- 2. 告警阈值配置 ---
-WEBHOOK_URL="https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN_HERE"
+WEBHOOK_URL="$(cat "$WEBHOOK_CONF")"
 # 在此填入你的WEBHOOK
 
 DISK_WARN=80
@@ -33,7 +35,8 @@ send_webhook_alert() {
     local host="$1"
     local level="$2"
     local reason="$3"
-    
+    local api_response
+    local curl_status
     local json_payload=$(cat <<EOF
 {
     "msgtype": "text",
@@ -45,16 +48,16 @@ EOF
 )
 
     if [ -n "$WEBHOOK_URL" ]; then
-        local api_response
-        api_response=$(curl -s --connect-timeout 5 -m 10 -X POST "$WEBHOOK_URL" \
-             -H "Content-Type: application/json" \
-             -d "$json_payload")
-        
-        local curl_status=$?
-        if [ $curl_status -ne 0 ]; then
-            echo "$(ts) ERROR: Webhook network failed for $host (exit code: $curl_status)" >> "$LOG_FILE"
+        if api_response=$(curl -s --connect-timeout 5 -m 10 \
+        	-X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$json_payload")
+        then
+        	echo "$(ts) INFO: Webhook triggered for $host. Response: $api_response" >> "$LOG_FILE"
         else
-            echo "$(ts) INFO: Webhook triggered for $host. Response: $api_response" >> "$LOG_FILE"
+        	curl_status=$?
+            echo "$(ts) ERROR: Webhook network failed for $host (exit code: $curl_status)" >> "$LOG_FILE"
+            return 0 
         fi
     fi
 }
@@ -75,7 +78,8 @@ run_ssh() {
 
 # --- 4. 巡检主流程 ---
 while read -r TARGET_HOST || [ -n "$TARGET_HOST" ]; do
-  TARGET_HOST=$(echo "$TARGET_HOST" | tr -d '\r')
+  TARGET_HOST=$(echo "$TARGET_HOST" | tr -d '\r') 
+  # 清除可能的Windows换行符
   [[ -z "$TARGET_HOST" || "$TARGET_HOST" =~ ^# ]] && continue
 
   LOCK_FILE="/tmp/healthcheck_${TARGET_HOST}.lock"
@@ -86,6 +90,12 @@ while read -r TARGET_HOST || [ -n "$TARGET_HOST" ]; do
   mkdir -p "$LOG_DIR"
 
   (
+	if ! exec 9> "$LOCK_FILE"
+	then
+		echo "$(ts) ERROR: cannot open lock file: $LOCK_FILE" >> "$LOG_FILE"
+		exit 1
+	fi
+  	
     if ! flock -n 9; then
       echo "$(ts) LOCKED: another instance for $TARGET_HOST is running" >> "$LOG_FILE"
       exit 0 
