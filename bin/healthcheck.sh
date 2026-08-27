@@ -26,6 +26,8 @@ DISK_WARN=80
 DISK_CRIT=90
 LOAD_WARN_PER_CORE=0.7
 LOAD_CRIT_PER_CORE=1.0
+MEMORY_WARN=0.8
+MEMORY_CRIT=0.9
 
 # --- 3. 核心工具函数 ---
 
@@ -63,17 +65,20 @@ EOF
 }
 
 run_ssh() {
-  local out rc
-  out=$(timeout 5s ssh -n \
+  	local out
+  
+  	if	out=$(timeout 5s ssh -n \
             -o BatchMode=yes \
             -o ConnectTimeout=5 \
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
             -o LogLevel=ERROR \
             "$TARGET_HOST" "$@" )
-  rc=$?
-  if [ $rc -ne 0 ]; then return $rc; fi
-  printf "%s" "$out"
+	then
+		printf "%s" "$out"
+	else
+		return $?
+	fi
 }
 
 # --- 4. 巡检主流程 ---
@@ -110,6 +115,7 @@ while read -r TARGET_HOST || [ -n "$TARGET_HOST" ]; do
     check_hostname=$STATUS_UNKNOWN
     check_load=$STATUS_UNKNOWN
     check_disk=$STATUS_UNKNOWN
+    check_memory=$STATUS_UNKNOWN
 
     {
       echo "==== CHECK_TIME=$(ts) HOST=$TARGET_HOST ===="
@@ -166,11 +172,25 @@ while read -r TARGET_HOST || [ -n "$TARGET_HOST" ]; do
         fi
       fi
 
+      if MEMORY_USED=$(run_ssh free | awk 'NR==2 {print $3/$2}'); then
+      	echo "MEMORY_USED=$MEMORY_USED"
+      	if awk -v l="$MEMORY_USED" -v t="$MEMORY_CRIT" 'BEGIN{exit (l>=t)?0:1}'; then
+      	  check_memory=$STATUS_CRIT
+      	  overall=$STATUS_CRIT
+      	elif awk -v l="$MEMORY_USED" -v t="$MEMORY_WARN" 'BEGIN{exit (l>=t)?0:1}'; then
+      	  check_memory=$STATUS_WARN
+      	  (( overall < STATUS_WARN )) && overall=$STATUS_WARN
+      	else
+      	  check_memory=$STATUS_OK
+      	fi
+      fi
+
       case "$overall" in
         1) 
            alert_reason=""
            [ "$check_load" -eq "$STATUS_WARN" ] && alert_reason+="  - 负载偏高: $LOAD_1MIN\n"
            [ "$check_disk" -eq "$STATUS_WARN" ] && alert_reason+="  - 磁盘偏高: $DISK_ROOT_USED\n"
+           [ "$check_memory" -eq "$STATUS_WARN" ] && alert_reason+="  - 内存偏高: $MEMORY_USED\n"
            send_webhook_alert "$TARGET_HOST" "WARNING" "$alert_reason"
            echo "SUMMARY=WARN"
            ;;
@@ -178,6 +198,7 @@ while read -r TARGET_HOST || [ -n "$TARGET_HOST" ]; do
            alert_reason=""
            [ "$check_load" -eq "$STATUS_CRIT" ] && alert_reason+="  - 负载严重: $LOAD_1MIN\n"
            [ "$check_disk" -eq "$STATUS_CRIT" ] && alert_reason+="  - 磁盘严重: $DISK_ROOT_USED\n"
+           [ "$check_memory" -eq "$STATUS_CRIT" ] && alert_reason+="  - 内存严重: $MEMORY_USED\n"
            send_webhook_alert "$TARGET_HOST" "CRITICAL" "$alert_reason"
            echo "SUMMARY=CRIT"
            ;;
