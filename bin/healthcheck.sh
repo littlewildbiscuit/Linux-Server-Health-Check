@@ -12,24 +12,26 @@ BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 HOSTS_CONF="$BASE_DIR/conf/hosts.conf"
 WEBHOOK_CONF="$BASE_DIR/conf/webhook.conf"
 LOG_RETENTION_DAYS=7
+WEBHOOK_URL="$(cat "$WEBHOOK_CONF")"
+source "$BASE_DIR/conf/settings.conf"
 
 if [ ! -f "$HOSTS_CONF" ]; then
     echo "$(date '+%F %T') ERROR: Config file $HOSTS_CONF not found!" >&2
     exit 1
 fi
 
-# --- 2. 告警阈值配置 ---
-WEBHOOK_URL="$(cat "$WEBHOOK_CONF")"
-# 在此填入你的WEBHOOK
+
 
 DISK_WARN=80
 DISK_CRIT=90
+INODE_WARN=80
+INODE_CRIT=90
 LOAD_WARN_PER_CORE=0.7
 LOAD_CRIT_PER_CORE=1.0
 MEMORY_WARN=0.8
 MEMORY_CRIT=0.9
 
-# --- 3. 核心工具函数 ---
+# --- 2. 核心工具函数 ---
 
 ts() { date '+%F %T'; }
 
@@ -81,7 +83,7 @@ run_ssh() {
 	fi
 }
 
-# --- 4. 巡检主流程 ---
+# --- 3. 巡检主流程 ---
 while read -r TARGET_HOST || [ -n "$TARGET_HOST" ]; do
   TARGET_HOST=$(echo "$TARGET_HOST" | tr -d '\r') 
   # 清除可能的Windows换行符
@@ -115,7 +117,11 @@ while read -r TARGET_HOST || [ -n "$TARGET_HOST" ]; do
     check_hostname=$STATUS_UNKNOWN
     check_load=$STATUS_UNKNOWN
     check_disk=$STATUS_UNKNOWN
+    check_inode=$STATUS_UNKNOWN
     check_memory=$STATUS_UNKNOWN
+    check_proc=$STATUS_UNKNOWN
+
+    DEAD_PROCS=""
 
     {
       echo "==== CHECK_TIME=$(ts) HOST=$TARGET_HOST ===="
@@ -172,6 +178,22 @@ while read -r TARGET_HOST || [ -n "$TARGET_HOST" ]; do
         fi
       fi
 
+      if INODE_ROOT_USED=$(run_ssh df -i / | awk 'NR==2 {print $5}'); then
+      	echo "INODE_ROOT_USED=$INODE_ROOT_USED"
+      	inode_num=$(echo "$INODE_ROOT_USED" | tr -d '%' )
+      	if [[ "$inode_num" =~ ^[0-9]+$ ]]; then
+		  if [ "$inode_num" -ge "$INODE_CRIT" ]; then
+		  	check_inode=$STATUS_CRIT
+		  	overall=$STATUS_CRIT
+		  elif [ "$inode_num" -ge "$INODE_WARN" ]; then
+		  	check_inode=$STATUS_WARN
+		  	(( overall < STATUS_WARN )) && overall=$STATUS_WARN
+		  else
+		  	check_inode=$STATUS_OK
+		  fi
+		fi
+      fi
+
       if MEMORY_USED=$(run_ssh free | awk 'NR==2 {print $3/$2}'); then
       	echo "MEMORY_USED=$MEMORY_USED"
       	if awk -v l="$MEMORY_USED" -v t="$MEMORY_CRIT" 'BEGIN{exit (l>=t)?0:1}'; then
@@ -185,20 +207,38 @@ while read -r TARGET_HOST || [ -n "$TARGET_HOST" ]; do
       	fi
       fi
 
+      if [ -n "${WATCH_PROCS:-}" ]; then
+        check_proc=$STATUS_OK
+        
+        for p in $WATCH_PROCS; do
+          if run_ssh pgrep -x "$p" >/dev/null 2>&1; then
+            echo "PROC_${p}=UP"
+          else
+            echo "PROC_${p}=DOWN"
+            DEAD_PROCS+="$p "
+            check_proc=$STATUS_CRIT
+            overall=$STATUS_CRIT
+          fi
+        done
+      fi
+
       case "$overall" in
         1) 
            alert_reason=""
            [ "$check_load" -eq "$STATUS_WARN" ] && alert_reason+="  - 负载偏高: $LOAD_1MIN\n"
            [ "$check_disk" -eq "$STATUS_WARN" ] && alert_reason+="  - 磁盘偏高: $DISK_ROOT_USED\n"
            [ "$check_memory" -eq "$STATUS_WARN" ] && alert_reason+="  - 内存偏高: $MEMORY_USED\n"
+           [ "$check_inode" -eq "$STATUS_WARN" ] && alert_reason+="  - inode偏高: $INODE_ROOT_USED\n"
            send_webhook_alert "$TARGET_HOST" "WARNING" "$alert_reason"
            echo "SUMMARY=WARN"
            ;;
         2) 
            alert_reason=""
-           [ "$check_load" -eq "$STATUS_CRIT" ] && alert_reason+="  - 负载严重: $LOAD_1MIN\n"
-           [ "$check_disk" -eq "$STATUS_CRIT" ] && alert_reason+="  - 磁盘严重: $DISK_ROOT_USED\n"
-           [ "$check_memory" -eq "$STATUS_CRIT" ] && alert_reason+="  - 内存严重: $MEMORY_USED\n"
+           [ "$check_load" -eq "$STATUS_CRIT" ] && alert_reason+="  - 负载过高: $LOAD_1MIN\n"
+           [ "$check_disk" -eq "$STATUS_CRIT" ] && alert_reason+="  - 磁盘过高: $DISK_ROOT_USED\n"
+           [ "$check_memory" -eq "$STATUS_CRIT" ] && alert_reason+="  - 内存过高: $MEMORY_USED\n"
+           [ "$check_inode" -eq "$STATUS_CRIT" ] && alert_reason+="  - inode过高: $INODE_ROOT_USED\n"
+           [ -n "$DEAD_PROCS" ] && alert_reason+="  - 进程未运行: $DEAD_PROCS\n"
            send_webhook_alert "$TARGET_HOST" "CRITICAL" "$alert_reason"
            echo "SUMMARY=CRIT"
            ;;
