@@ -11,26 +11,17 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 HOSTS_CONF="$BASE_DIR/conf/hosts.conf"
 WEBHOOK_CONF="$BASE_DIR/conf/webhook.conf"
-LOG_RETENTION_DAYS=7
+SETTINGS_CONF="$BASE_DIR/conf/settings.conf"
+
+for cfg in "$HOSTS_CONF" "$WEBHOOK_CONF" "$SETTINGS_CONF"; do
+    if [ ! -f "$cfg" ]; then
+        echo "$(date '+%F %T') ERROR: conf/$cfg not found. Copy from conf/$cfg.example" >&2
+        exit 1
+    fi
+done
+
 WEBHOOK_URL="$(cat "$WEBHOOK_CONF")"
 source "$BASE_DIR/conf/settings.conf"
-
-if [ ! -f "$HOSTS_CONF" ]; then
-    echo "$(date '+%F %T') ERROR: Config file $HOSTS_CONF not found!" >&2
-    exit 1
-fi
-
-
-
-DISK_WARN=80
-DISK_CRIT=90
-INODE_WARN=80
-INODE_CRIT=90
-LOAD_WARN_PER_CORE=0.7
-LOAD_CRIT_PER_CORE=1.0
-MEMORY_WARN=0.8
-MEMORY_CRIT=0.9
-
 # --- 2. 核心工具函数 ---
 
 ts() { date '+%F %T'; }
